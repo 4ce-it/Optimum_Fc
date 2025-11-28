@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# optimum_fc_full.py - FINAL: EXACT TEAM FILLING + EXTRA TEAMS
+# optimum_fc_final_perfect.py - FULLY WORKING LOCAL + RENDER
 import os
+import threading
 import logging
-from math import ceil
 from random import shuffle
 from typing import Dict, Any, List, Optional
-from dotenv import load_dotenv
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -16,15 +16,24 @@ from telegram.ext import (
     filters,
 )
 
-# === Load .env ===
+# Flask only needed on Render
+try:
+    from flask import Flask
+    FLASK_AVAILABLE = True
+except ImportError:
+    FLASK_AVAILABLE = False
+
+from dotenv import load_dotenv
 load_dotenv()
 
 # === CONFIG ===
-BOT_DISPLAY_NAME = "Optimum_Fc-Team_selector"
-CREATOR = "4ce"
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN not found in .env")
+    raise RuntimeError("Set TELEGRAM_TOKEN in .env or Render environment")
+
+PORT = int(os.getenv("PORT", "10000"))
+BOT_DISPLAY_NAME = "Optimum_Fc-Team_selector"
+CREATOR = "4ce"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -64,7 +73,7 @@ def make_main_action_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("New game", callback_data="action_newgame")]
     ])
 
-# === Team Allocation - FIXED: FILL MAIN TEAMS FIRST, THEN EXTRAS ===
+# === Team Allocation ===
 def total_team_count(team: Dict[str, List[str]]) -> int:
     return sum(len(team.get(p, [])) for p in ("defender", "midfielder", "striker"))
 
@@ -75,7 +84,6 @@ def allocate_teams(
     pos_quota: Dict[str, int]
 ) -> tuple[List[Dict[str, List[str]]], Optional[str]]:
 
-    # Make copies
     pool = {pos: players_dict[pos].copy() for pos in ("defender", "midfielder", "striker")}
     for pos in pool:
         shuffle(pool[pos])
@@ -83,56 +91,42 @@ def allocate_teams(
     teams: List[Dict[str, List[str]]] = []
     extra_note = None
 
-    # === STEP 1: Fill EXACTLY `requested_teams` with FULL quotas ===
-    for team_idx in range(requested_teams):
+    for _ in range(requested_teams):
         team = {"defender": [], "midfielder": [], "striker": []}
         for pos in ("defender", "midfielder", "striker"):
             needed = pos_quota.get(pos, 0)
             for _ in range(needed):
                 if pool[pos]:
                     team[pos].append(pool[pos].pop(0))
-                else:
-                    break  # Not enough — but we still create team
         teams.append(team)
 
-    # === STEP 2: Distribute ALL remaining players into NEW teams ===
-    leftovers = []
-    for pos in pool:
-        leftovers.extend(pool[pos])
-
+    leftovers = [p for pos in pool for p in pool[pos]]
     if leftovers:
         shuffle(leftovers)
         extra_team = {"defender": [], "midfielder": [], "striker": []}
         for player in leftovers:
-            # Try to assign by original position if possible
-            assigned = False
             for pos in ("defender", "midfielder", "striker"):
                 if player in players_dict[pos]:
                     extra_team[pos].append(player)
-                    assigned = True
                     break
-            if not assigned:
-                extra_team["striker"].append(player)  # fallback
+            else:
+                extra_team["striker"].append(player)
         teams.append(extra_team)
         extra_note = "*Extra team created for remaining players.*"
 
     return teams, extra_note
 
-# === RENDER TEAMS - WITH YOUR EMOJIS ===
 def render_teams(teams: List[Dict[str, List[str]]], note: Optional[str] = None) -> str:
     lines = ["Kick-off! Here are the teams:\n"]
-    
     for idx, team in enumerate(teams, start=1):
         count = total_team_count(team)
         lines.append(f"<b>Team {idx}</b> — <i>{count} players</i>")
         lines.append(f"Defenders: {', '.join(team['defender']) if team['defender'] else '—'}")
         lines.append(f"Midfielders: {', '.join(team['midfielder']) if team['midfielder'] else '—'}")
-        lines.append(f"Striker: {', '.join(team['striker']) if team['striker'] else '—'}")
+        lines.append(f"Strikers: {', '.join(team['striker']) if team['striker'] else '—'}")
         lines.append("")
-
     if note:
         lines.append(f"{note}\n")
-
     lines.append("<i>bot created by 4ce</i>")
     return "\n".join(lines)
 
@@ -246,11 +240,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("No name pending.")
             return
         name = g["pending_name"]
-        pos_map = {
-            "assign_def": ("defender", "Defender"),
-            "assign_mid": ("midfielder", "Midfielder"),
-            "assign_str": ("striker", "Striker"),
-        }
+        pos_map = {"assign_def": ("defender", "Defender"), "assign_mid": ("midfielder", "Midfielder"), "assign_str": ("striker", "Striker")}
         pos, role = pos_map[data]
         g["players"][pos].append(name)
         g["pending_name"] = None
@@ -298,25 +288,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         players_copy = {k: v.copy() for k, v in g["players"].items()}
-        teams, note = allocate_teams(
-            players_copy,
-            g["requested_teams"],
-            g["players_per_team"],
-            g["pos_quota"]
-        )
-        if not teams:
-            await query.message.reply_text("No players.")
-            return
-
+        teams, note = allocate_teams(players_copy, g["requested_teams"], g["players_per_team"], g["pos_quota"])
         out = render_teams(teams, note)
         await query.message.reply_text(out, parse_mode="HTML")
-        await query.message.reply_text(
-            "Choose:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Randomize again", callback_data="action_randomize"),
-                 InlineKeyboardButton("New game", callback_data="action_newgame")]
-            ])
-        )
+        await query.message.reply_text("Choose:", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Randomize again", callback_data="action_randomize"),
+             InlineKeyboardButton("New game", callback_data="action_newgame")]
+        ]))
         return
 
     if data == "action_add":
@@ -357,19 +335,41 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         await query.message.reply_text("New game started! Send player names.")
 
-# === Main ===
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("newgame", newgame))
-    app.add_handler(CommandHandler("done", done))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    print(f"{BOT_DISPLAY_NAME} is running. Creator: {CREATOR}")
-    app.run_polling()
+# === Flask (only for Render) ===
+def run_flask():
+    if FLASK_AVAILABLE:
+        app = Flask(__name__)
+        @app.route('/')
+        def index():
+            return f"<h1>{BOT_DISPLAY_NAME} is running!</h1><p>Bot is alive on Telegram</p>"
+        app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
 
+# === MAIN ===
 if __name__ == "__main__":
-    main()
+    application = ApplicationBuilder().token(TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_cmd))
+    application.add_handler(CommandHandler("newgame", newgame))
+    application.add_handler(CommandHandler("done", done))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("cancel", cancel))
+    application.add_handler(CallbackQueryHandler(callback_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+
+    # Auto-detect environment
+    is_render = os.getenv("RENDER") or os.getenv("RENDER_EXTERNAL_HOSTNAME")
+
+    if is_render and FLASK_AVAILABLE:
+        threading.Thread(target=run_flask, daemon=True).start()
+        webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
+        print(f"RENDER MODE → Webhook: {webhook_url}")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=webhook_url
+        )
+    else:
+        print("LOCAL MODE → Using polling (instant & safe)")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
