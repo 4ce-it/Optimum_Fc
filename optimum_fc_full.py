@@ -360,8 +360,8 @@ if __name__ == "__main__":
     # Auto-detect environment
     is_render = os.getenv("RENDER") or os.getenv("RENDER_EXTERNAL_HOSTNAME")
 
-    if is_render and FLASK_AVAILABLE:
-        threading.Thread(target=run_flask, daemon=True).start()
+    if is_render:
+        # threading.Thread(target=run_flask, daemon=True).start()
         webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
         print(f"RENDER MODE → Webhook: {webhook_url}")
         application.run_webhook(
